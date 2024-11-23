@@ -24,6 +24,7 @@
 from nicos import session
 from nicos_sinq.sxtal.singlexlib import calculateBMatrix as genB
 from nicos_sinq.sxtal.singlexlib import matFromTwoVectors
+from math import cos, sin, sqrt
 import numpy as np
 import os
 from os import path
@@ -58,12 +59,13 @@ def Zrot(a, typecode='d'):
     ca = np.cos(a)
     return np.array([[ca, sa, 0], [-sa, ca, 0], [0, 0, 1.0]],
                     typecode)
+
 def Rot(r, typecode='d'):
     """Construction of full rotation matrix"""
     X = Xrot(r[0])
     Y = Yrot(r[1])
     Z = Zrot(r[2])
-    return Z @ Y @ Z
+    return Z @ Y @ X
 
 
 
@@ -84,7 +86,7 @@ def couple(hkls, obs, instr, sample, min, refs = None):
             V1 = np.matmul(B,h1)
             h2 = hkls[j]
             V2 = np.matmul(B,h2)
-            V3 = np.cross(V1, V2)
+            V3 = prodv(V1, V2)
             V1M, V1 = normv(V1)
             V2M, V2 = normv(V2)
             V3M, V3 = normv(V3)
@@ -146,7 +148,7 @@ def UNBVectorFromAngles(reflection):
     u[2] = sin(nu)
     return u
 
-def UVectorFromAngles(reflection):
+def UVectorFromAngles(instr,hkl,reflection):
     """
     Calculate the B&L U vector from normal beam geometry angles
     Not using normal function as it uses wrong references
@@ -156,9 +158,15 @@ def UVectorFromAngles(reflection):
     # The tricky bit is set again: Busing & Levy's omega is 0 in
     # bisecting position. This is why we have to correct for
     # stt/2 here
-    om = np.deg2rad(reflection[1] - reflection[0]/2)
-    chi = np.deg2rad(reflection[2])
-    phi = np.deg2rad(reflection[3])
+    sign = np.sign(reflection[0])
+
+    hkld = np.sqrt(hkl[0]**2 + hkl[1]**2 + hkl[2]**2)
+    theta = np.arcsin(hkld*instr.wavelength/2)
+    
+    om = sign*np.deg2rad(reflection[1]) - theta
+    chi = sign*np.deg2rad(reflection[2])
+    phi = np.deg2rad(reflection[3]) + (sign-1)*np.pi/2
+    
     u[0] = cos(om) * cos(chi) * cos(phi) - sin(om) * sin(phi)
     u[1] = cos(om) * cos(chi) * sin(phi) + sin(om) * cos(phi)
     u[2] = cos(om) * sin(chi)
@@ -169,10 +177,11 @@ def UKVectorFromAngles(reflection):
     Calculate the B&L U vector from normal beam geometry angles
     Not using normal function as it uses wrong references
     """
-    
+    session.log.warning("Kappa not implemented yet")
     return 0
 
-
+#TODO This is such a shitty way of doing this, but is the best i know right now
+#     Should be done better in the future
 def vecori(v1, v2, dials):
     """
     Function to rotate calculated orienting reflections such 
@@ -180,10 +189,10 @@ def vecori(v1, v2, dials):
     """
     RAD2DEG = 180/np.pi
     dials = np.array(dials) / RAD2DEG 
-    VN = np.cross(v1,v2)
+    VN = prodv(v1,v2)
     VXM, VX = normv(v1)
     VZM, VZ = normv(VN)
-    VYM, VY = normv(np.cross(VZ,VX))
+    VYM, VY = normv(prodv(VZ,VX))
 
     for i in range(3):
         j = (1+i) % 3
@@ -195,15 +204,25 @@ def vecori(v1, v2, dials):
         BI = B.T
         V01 = BI @ v1
         V02 = BI @ v2
+        # Small angle approximation for dials
         CE = 1 - dials[i]**2 /2
         SE = dials[i]
-        C = np.array([[1,0,0],[0,CE,-SE],[0,SE,CE]])
+        C = np.array([[1,0,0],[0,CE,SE],[0,-SE,CE]])
         V001 = C @ V01
         V002 = C @ V02
         v1 = B @ V001
         v2 = B @ V002
     return v1, v2
 
+def prodv(v1, v2):
+    """
+    Function to calculate the cross product of two vectors
+    """
+    v3 = np.zeros(3)
+    v3[0] = v1[1]*v2[2] - v1[2]*v2[1]
+    v3[1] = v1[2]*v2[0] - v1[0]*v2[2]
+    v3[2] = v1[0]*v2[1] - v1[1]*v2[0]
+    return v3
 
 def tr1p(X,Y):
     """
@@ -213,11 +232,11 @@ def tr1p(X,Y):
     XM, XX = normv(X)
 
     # Calculate Z
-    Z = np.cross(X,Y)
+    Z = prodv(X,Y)
     ZM, ZZ = normv(Z)
 
     # Calculate cross product of Z and X
-    YY = np.cross(ZZ, XX)
+    YY = prodv(ZZ, XX)
     XYZ = np.column_stack((XX, YY, ZZ))
 
     return XYZ
@@ -236,38 +255,38 @@ def newUB(instr, sample, rfl, offsets, disps, dials, refine_type):
     """
     r1_temp = rfl.get_reflection(instr.orienting_reflections[0])
     r2_temp = rfl.get_reflection(instr.orienting_reflections[1])
-    r11 = (r1_temp[0])
-    r21 = (r2_temp[0])
-    r12 = tuple([r1_temp[1][i]-offsets[i]+displacements(refine_type, r1_temp[1][i]-offsets[i], disps, i) for i in range(len(offsets))])
-    r22 = tuple([r2_temp[1][i]-offsets[i]+displacements(refine_type, r2_temp[1][i]-offsets[i], disps, i) for i in range(len(offsets))])
-    r1 = (r11,r12,())
-    r2 = (r21,r22,())
-    B = genB(sample.getCell())
+    r11 = (r1_temp[0]) # hkl of reflection 1
+    r21 = (r2_temp[0]) # hkl of reflection 2
+    r12 = tuple([r1_temp[1][i]-offsets[i]+displacements(refine_type, r1_temp[1][i]-offsets[i], disps, i) for i in range(len(offsets))]) # angles of reflection 1
+    r22 = tuple([r2_temp[1][i]-offsets[i]+displacements(refine_type, r2_temp[1][i]-offsets[i], disps, i) for i in range(len(offsets))]) # angles of reflection 2
+    
+    B = genB(sample.getCell()) # B matrix
     if not B.any():
         return None
-    h1 = B.dot(r11)
-    h2 = B.dot(r21)
+    h1 = B.dot(r11) # hkl of reflection 1 in reciprocal space
+    h2 = B.dot(r21) # hkl of reflection 2 in reciprocal space
     HT = matFromTwoVectors(h1, h2)
     if refine_type == "NB":
         u1 = UNBVectorFromAngles(r12)
         u2 = UNBVectorFromAngles(r22)
+        u1, u2 = vecori(u1,u2,dials)
+        TR1PC = tr1p(h1,h2)
+        TTR1PC = TR1PC.T
+        TR1PO = tr1p(u1,u2)
+        U = np.dot(TR1PO,TTR1PC)
     elif refine_type == "Euler":
-        u1 = UVectorFromAngles(r12)
-        u2 = UVectorFromAngles(r22)
+        u1 = UVectorFromAngles(instr,h1,r12)
+        u2 = UVectorFromAngles(instr,h2,r22)
+        u1, u2 = vecori(u1,u2,dials)
+        TR1PC = tr1p(h1,h2)
+        TRIPO = tr1p(u1,u2)
+        TR1PCT = np.linalg.inv(TR1PC)
+        U = np.dot(TRIPO,TR1PCT)
+        sample.ubmatrix = list(np.dot(U,B).flatten())
     elif refine_type == "Kappa":
         u1 = UKVectorFromAngles(r12)
         u2 = UKVectorFromAngles(r22)
-    UT = matFromTwoVectors(u1, u2)
-    HTT = HT.transpose()
-    U = UT.dot(HTT)
-    UB = U.dot(B)
-    v1, v2 = UB.dot(r11) , UB.dot(r21)
-    v1, v2 = vecori(v1, v2, dials)
-    TR1PC = tr1p(h1, h2)
-    TR1PC = TR1PC.T
-    TR1PO = tr1p(v1, v2)
-    U = np.dot(TR1PO,TR1PC)
-    sample.ubmatrix = list(np.dot(U,B).flatten())
+    
 
 
 def displacements(refine_type, angle, disps, index):
@@ -280,6 +299,100 @@ def displacements(refine_type, angle, disps, index):
         if index == 1:
             disp += np.arcsin(np.sin(angle*DEG2RAD+np.arctan2(disps[0],disps[1]))*np.sqrt(disps[1]**2+disps[0]**2)/D)/DEG2RAD
     return disp
+
+def slect(val1, val2, ref):
+    def normalize(val):
+        return (val + np.pi) % (2*np.pi) - np.pi
+    
+    def diff(val1,ref):
+        return abs(normalize(val1)-normalize(ref))
+    
+    diff1 = diff(val1,ref)
+    diff2 = diff(val2,ref)
+    
+    if diff1 < diff2:
+        return val1
+    else:
+        return val2
+
+def treq(A, B, C):
+    """
+    solves the equation A*cos(X)+B*sin(X) = C
+    """
+    eta = np.arctan2(B,A)
+    bss = np.abs(A**2+B**2-C**2)
+    if bss < 10**(-5):
+        bss = 0
+    bs = np.sqrt(bss)
+    gam = np.arctan2(bs,C)
+    return eta+gam, eta-gam
+
+# Calculation of euler angles if not bisecting.
+def calc_euler_angles(sample, instr, hkl, obs, offsets):
+    calc = np.zeros(4)
+    er = 0
+
+    UB = np.reshape(sample.ubmatrix, (3,3)) 
+    h01 = UB @ hkl 
+    hkl, h02 = normv(h01)
+
+    if hkl < 0.000001:
+        IER = 2
+        session.log.error("HKL is too small for calculation")
+        raise TypeError()
+
+    l = instr.wavelength
+    sintheta = hkl * l / 2.0
+    if abs(sintheta) > 1.0:
+        IER = 1
+        session.log.error("Calculated Sin(theta) > 1")
+        raise TypeError()
+
+    tt = np.arcsin(sintheta)
+
+    cor_obs = np.zeros(4)
+    sig = np.sign(obs[0]) 
+    for i in range(3):
+        cor_obs[i] = sig * (obs[i] - offsets[i])
+
+    if sig == -1:
+        cor_obs[3] = obs[3] - np.sign(obs[3]) * 180
+    else:
+        cor_obs[3] = obs[3]
+
+    stt1 = 2.0 * tt
+    stt2 = -2.0 * tt
+    calc[0] = slect(stt1, stt2, cor_obs[0]*np.pi/180)
+
+    cp = np.cos(cor_obs[3]*np.pi/180)
+    sp = np.sin(cor_obs[3]*np.pi/180)
+    ph = np.array([[cp, sp, 0.0], [-sp, cp, 0.0], [0.0, 0.0, 1.0]])
+
+    h03 = ph @ h02
+    chi = np.arctan2(h03[2], h03[0])
+
+    chi1 = chi
+    chi2 = chi + np.pi
+    calc[2] = slect(chi1, chi2, cor_obs[2]*np.pi/180)
+
+    chi = calc[2]
+    cc = np.cos(chi)
+    sc = np.sin(chi)
+    ch = np.array([[cc, 0.0, sc], [0.0, 1.0, 0.0], [-sc, 0.0, cc]])
+
+    h04 = ch @ h03
+    om1, om2 = treq(-h04[1],h04[0],sintheta)
+    calc[1] = slect(om1, om2, cor_obs[1]*np.pi/180)
+
+    for i in range(3):
+        calc[i] = sig * calc[i] + offsets[i]*np.pi/180
+    calc[3] = obs[3]*np.pi/180
+
+    psiy = -np.sin(cor_obs[1]*np.pi/180 - tt) * np.sin(cor_obs[2]*np.pi/180)
+    psix = np.cos(cor_obs[2]*np.pi/180)
+    psi = np.arctan2(psiy, psix)
+
+    return calc*180/np.pi, psi
 
 
 # Residual function for optimization. Calculates positions of reflections
@@ -323,7 +436,6 @@ def residuals(param, sample, instr, limits, rfl, hkls, obs, refine_type, verbose
     # Calculate new UB matrix
     newUB(instr,sample, rfl, offsets, disps, dials, refine_type)
     
-
     # Lists to fill up with data. Calc is not used at the moment
     # but can be used as a debugging tool to compare to fortran rafin
     calc = []
@@ -332,22 +444,27 @@ def residuals(param, sample, instr, limits, rfl, hkls, obs, refine_type, verbose
     # Loop through reflections
     for i, hkl in enumerate(hkls):
         # Calculate positions of angles
-        poslist = np.array(instr._extractPos(instr._calcPos(hkl)))
+        if refine_type == "NB":
+            poslist = np.array(instr._extractPos(instr._calcPos(hkl)))
+        if refine_type == "Euler":
+            poslist, psi = calc_euler_angles(sample, instr, hkl, obs[i], offsets)
         diff_temp = []
         calc_temp = []
         for j, ang in enumerate(poslist):
-            if j > 2:
-                continue
-            a = float(ang[1]) + offsets[j]
-            a += displacements(refine_type, a, disps, j)
-
-            # Calculate difference
-            if a > 180:
-                calc_temp.append(a-360)
-            elif a < -180:
-                calc_temp.append(a+360)
-            else:
+            if refine_type == "NB":
+                a = float(ang[1]) + offsets[j]
+                a += displacements(refine_type, a, disps, j)
+                if a > 180:
+                    calc_temp.append(a-360)
+                elif a < -180:
+                    calc_temp.append(a+360)
+                else:
+                    calc_temp.append(a)
+            if refine_type == "Euler":
+                a = float(ang)
+                a += displacements(refine_type, a, disps, j)
                 calc_temp.append(a)
+            
             diff_temp.append((obs[i,j]-a + 180) % 360 - 180)
 
         diff.append(diff_temp)
@@ -390,7 +507,7 @@ def p0_bounds(limits, instr, sample):
 
     # Get amount of motors
     motors = instr.get_motors()
-    init_offsets = [mot.offset for mot in motors]
+    init_offsets = [0 for mot in motors]
 
     # Set initial sample displacement
     disp_array = [0,0,0]
@@ -500,6 +617,8 @@ def refinement(func, p0, sample, instr, limits, rfl, hkls, obs, bounds, refine_t
 
         # Calculated reflections and cost for initial paramters
         calc0, c0 = residuals(p0, sample, instr, limits, rfl, hkls, obs, refine_type, verb)
+        if refine_type == "Euler":
+            c0 = c0[:,:3]
         cost.append(sum(((c0/RAD2DEG).flatten())**2))
         dev.append(np.sqrt(cost[i]/(3*NOL)))
         DYC = np.zeros((NP,NOL,3))
@@ -510,7 +629,9 @@ def refinement(func, p0, sample, instr, limits, rfl, hkls, obs, bounds, refine_t
         # Slightly vary parameters and calculate differences
         for j in range(NP):
             p0[p_idxs[j]] += eps
-            calc, c = residuals(p0, sample, instr, limits, rfl, hkls, calc0, refine_type, 1)
+            calc, c = residuals(p0, sample, instr, limits, rfl, hkls, calc0, refine_type, 0)
+            if refine_type == "Euler":
+                c = c[:,:3]
             p0[p_idxs[j]] -= eps
             DYC[j] = -c/eps/RAD2DEG
       
@@ -691,12 +812,23 @@ def PyRefine(*args, orienting_refs=None, ignore_refs=[], verbose=1, replace=Fals
         hkls.append(hkl_temp)
         obs_temp = []
         for i, a in enumerate(r[1]):
-            if i > 2:
-                continue
             obs_temp.append(a)
         obs.append(obs_temp)
     hkls = np.array(hkls)
     obs = np.array(obs)
+    
+    # Print reflections
+    session.log.info('')
+    session.log.info('Reflections:')
+    if refine_type == "Euler":
+        session.log.info(' H   K   L  {:^9}  {:^9}  {:^9}  {:^9}'.format("2Theta", "Omega", "Chi", "Phi"))
+        for i in range(len(hkls)):
+            session.log.info('{:>2d}  {:>2d}  {:>2d}  {:>9.4f}  {:>9.4f}  {:>9.4f} {:>9.4f}'.format(int(hkls[i,0]),int(hkls[i,1]),int(hkls[i,2]), obs[i,0], obs[i,1], obs[i,2], obs[i,3]))
+    elif refine_type == "NB":
+        session.log.info(' H   K   L  {:^9}  {:^9}  {:^9}'.format("2Theta", "Omega", "Chi"))
+        for i in range(len(hkls)):
+            session.log.info('{:>2d}  {:>2d}  {:>2d}  {:>9.4f}  {:>9.4f}  {:>9.4f}'.format(int(hkls[i,0]),int(hkls[i,1]),int(hkls[i,2]), obs[i,0], obs[i,1], obs[i,2]))
+            
 
     # Find orienting reflections to look at, calculate UB from there reflections
     if orienting_refs != None:
@@ -748,5 +880,3 @@ def PyRefine(*args, orienting_refs=None, ignore_refs=[], verbose=1, replace=Fals
         sample.beta =  p_init[4]
         sample.gamma =  p_init[5]
     session.log.info("Done, Goodbye :)")
-
-
